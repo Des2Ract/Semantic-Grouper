@@ -590,7 +590,7 @@ async def process_figma_data(json_data: JSONData):
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
 # Alternative endpoint if you want to return just the processed data
-@app.post("/semantic-grouper")
+@app.post("/api")
 async def process_figma_data_simple(json_data: JSONData) -> Dict[str, Any]:
     """
     Simplified version that returns only the processed JSON data
@@ -624,4 +624,4 @@ async def process_figma_data_simple(json_data: JSONData) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=7860)
