@@ -71,7 +71,7 @@ class FigmaNodeSimilarityDetector:
         # Check if tag is ICON or SVG - if so, return default vector of ones
         if tag in ["ICON", "SVG"]:
             # Create default vector with ones
-            default_size = 17  # structural(3) + style(12) + content(1) + descendant(1)
+            default_size = 18  # structural(3) + style(12) + content(1) + descendant(1)
             return np.zeros(default_size)
         
         vector = []
@@ -80,12 +80,14 @@ class FigmaNodeSimilarityDetector:
         node_type = node_info.get('type', '')
         has_children = len(node_data.get('children', [])) > 0
         num_children = len(node_data.get('children', []))
+        node_layout = node_info.get('layout', '')
 
         vector.extend([
             hash(node_type) % 1000 / 1000.0,  # Normalize hash
             # hash(tag) % 1000 / 1000.0,
             float(has_children),
             min(num_children / 10000.0, 1.0),  # Normalize to 0-1
+            hash(node_layout) % 1000 / 1000.0,  # Normalize hash
         ])
 
         # 2. Style Features
@@ -174,12 +176,12 @@ class FigmaNodeSimilarityDetector:
         # Check if tag is ICON or SVG - if so, return default vector of ones
         if tag in ["ICON", "SVG"]:
             # Create default vector with ones
-            default_size = 17  # structural(3) + style(12) + content(1) + descendant(1)
+            default_size = 18  # structural(3) + style(12) + content(1) + descendant(1)
             return np.zeros(default_size)
         
         if not children_vectors:
             # If no children vectors, create a default vector
-            default_size = 0 + 17  # Updated size: structural(3) + style(12) + content(1) + descendant(1)
+            default_size = 0 + 18  # Updated size: structural(3) + style(12) + content(1) + descendant(1)
             return np.zeros(default_size)
 
         # Average all children feature vectors
@@ -189,12 +191,15 @@ class FigmaNodeSimilarityDetector:
         node_info = node_data.get('node', {})
         node_type = node_info.get('type', '')
         num_children = len(children_vectors)
+        node_layout = node_info.get('layout', '')
+
 
         # Update structural features (first 3 elements)
         parent_vector[0] = hash(node_type) % 1000 / 1000.0
         # parent_vector[1] = hash(tag) % 1000 / 1000.0
         parent_vector[1] = 1.0  # Parent always has children
         parent_vector[2] = min(num_children / 10000.0, 1.0)
+        parent_vector[3] = hash(node_layout) % 1000 / 1000.0
 
         # Calculate total descendants
         total_descendants = num_children
@@ -462,7 +467,7 @@ class FigmaNodeSimilarityDetector:
         display_name = characters[:10] + "..." if is_text and characters else name
 
         # Layout info (if present)
-        layout = node_data.get("layoutMode", "NONE")
+        layout = node_data.get("layout", "NONE")
         layout_str = "ROWS" if layout == "HORIZONTAL" else "COLS" if layout == "VERTICAL" else layout
 
         # Get the current node path
@@ -570,7 +575,7 @@ class MinEditDistanceSemanticGrouper:
         node_type = node_info.get('type', '')
         has_text = bool(node_info.get('characters', ''))
         text_content = node_info.get('characters', '') if not self.ignore_text_content else ""
-        layout_mode = node_info.get('layoutMode', 'NONE')
+        layout_mode = node_info.get('layout', 'NONE')
         children_count = len(node_data.get('children', []))
         
         # Style hash (simplified - you can expand this)
@@ -630,7 +635,7 @@ class MinEditDistanceSemanticGrouper:
         
         # Layout properties
         style_props.extend([
-            str(node_info.get('layoutMode', 'NONE')),
+            str(node_info.get('layout', 'NONE')),
             str(node_info.get('paddingLeft', 0)),
             str(node_info.get('paddingRight', 0)),
             str(node_info.get('paddingTop', 0)),
@@ -1046,7 +1051,6 @@ def add_node_ids(data):
     process_node(data)
     return data
 
-# JSON Processing Functions
 def generate_unique_id():
     """Generate a unique ID similar to the existing format"""
     return f"unique_{uuid.uuid4().hex[:8]}"
@@ -1054,6 +1058,29 @@ def generate_unique_id():
 def is_group_node(node_id):
     """Check if node_id matches the group_X pattern"""
     return bool(re.match(r'^group_\d+$', node_id))
+
+def get_direct_children_groups(node):
+    """Get all group_ids from direct children that have group pattern"""
+    if 'children' not in node or not isinstance(node['children'], list):
+        return []
+    
+    groups = []
+    for child in node['children']:
+        if isinstance(child, dict) and 'node_id' in child and is_group_node(child['node_id']):
+            groups.append(child['node_id'])
+    
+    return groups
+
+def all_children_same_group(node):
+    """Check if all direct children have the same group_id"""
+    groups = get_direct_children_groups(node)
+    
+    # If no groups found or only one group, return False
+    if len(groups) <= 1:
+        return False
+    
+    # Check if all groups are the same
+    return len(set(groups)) == 1
 
 def convert_children_ids(node, visited=None):
     """Recursively convert all children node_ids to unique IDs"""
@@ -1076,24 +1103,34 @@ def convert_children_ids(node, visited=None):
             convert_children_ids(child, visited)
 
 def process_json_tree(data):
-    """Process the entire JSON tree looking for group nodes"""
+    """Process the entire JSON tree with enhanced logic"""
     def traverse(node):
-        # Check if current node has node_id with group_X pattern
-        if isinstance(node, dict) and 'node_id' in node and is_group_node(node['node_id']):
-            print(f"Found group node: {node['node_id']}")
-            print("Converting all children node_ids to unique IDs...")
-            convert_children_ids(node)
+        if isinstance(node, dict):
+            # Check condition 1: All direct children have the same group_id
+            if all_children_same_group(node):
+                print(f"Found node with all children having same group: {node.get('node_id', 'no_id')}")
+                print("Making parent node_id unique...")
+                if 'node_id' in node:
+                    node['node_id'] = generate_unique_id()
+            
+            # Check condition 2: Current node has group_X pattern
+            elif 'node_id' in node and is_group_node(node['node_id']):
+                print(f"Found group node: {node['node_id']}")
+                print("Converting all children node_ids to unique IDs...")
+                convert_children_ids(node)
+            
+            # Recursively traverse children
+            if 'children' in node and isinstance(node['children'], list):
+                for child in node['children']:
+                    traverse(child)
         
-        # Recursively traverse children
-        if isinstance(node, dict) and 'children' in node:
-            for child in node['children']:
-                traverse(child)
         elif isinstance(node, list):
             for item in node:
                 traverse(item)
     
     traverse(data)
     return data
+
 
 #################################################### UTILS ####################################################
 ###############################################################################################################
@@ -1224,7 +1261,7 @@ def print_figma_node(node, depth=0):
     display_name = characters[:10] + "..." if is_text and characters else name
 
     # Layout info (if present)
-    layout = node_data.get("layoutMode", "NONE")
+    layout = node_data.get("layout", "NONE")
     layout_str = "ROWS" if layout == "HORIZONTAL" else "COLS" if layout == "VERTICAL" else layout
 
     # Print current node info
@@ -1372,7 +1409,6 @@ async def process_figma_data_simple_enhanced(json_data: JSONData) -> Dict[str, A
         
         # Apply JSON tree processing before returning
         processed_result = process_json_tree(copy.deepcopy(result_json))
-        
         return processed_result
         
     except Exception as e:
