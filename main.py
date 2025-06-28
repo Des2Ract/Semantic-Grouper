@@ -17,13 +17,14 @@ import xml.etree.ElementTree as ET
 from PIL import Image, ImageDraw
 import json
 import random
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FigmaNodeSimilarityDetector:
+class FeatureVectorSemanticGrouper:
     """
     A flexible similarity detection system for Figma nodes using bottom-up approach.
     Feature vectors are extracted directly from leaf nodes and propagated upward.
@@ -39,13 +40,12 @@ class FigmaNodeSimilarityDetector:
         """
         self.similarity_threshold = similarity_threshold
         self.use_semantic_embeddings = use_semantic_embeddings
-        self.node_feature_vectors = {}  # Store feature vectors directly
+        self.node_feature_vectors = {} 
         self.node_metadata = {}  # Store metadata (is_leaf, etc.)
         self.similarity_matrix = None
         self.clusters = None
         self.node_tree = {}  # Store hierarchical structure
         
-        # Initialize semantic model if needed
         if use_semantic_embeddings:
             try:
                 self.semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -68,9 +68,7 @@ class FigmaNodeSimilarityDetector:
         node_info = node_data.get('node', {})
         tag = node_data.get('tag', '')
         
-        # Check if tag is ICON or SVG - if so, return default vector of ones
         if tag in ["ICON", "SVG"]:
-            # Create default vector with ones
             default_size = 18  # structural(3) + style(12) + content(1) + descendant(1)
             return np.zeros(default_size)
         
@@ -83,22 +81,19 @@ class FigmaNodeSimilarityDetector:
         node_layout = node_info.get('layout', '')
 
         vector.extend([
-            hash(node_type) % 1000 / 1000.0,  # Normalize hash
-            # hash(tag) % 1000 / 1000.0,
+            hash(node_type) % 1000 / 1000.0,  
             float(has_children),
-            min(num_children / 10000.0, 1.0),  # Normalize to 0-1
-            hash(node_layout) % 1000 / 1000.0,  # Normalize hash
+            min(num_children / 10000.0, 1.0),  
+            hash(node_layout) % 1000 / 1000.0,  
         ])
 
         # 2. Style Features
-        # Extract font information from textStyle
         text_style = node_info.get('textStyle', {})
         font_family = text_style.get('fontFamily', '')
         font_size = text_style.get('fontSize', 0)
         font_style = text_style.get('fontStyle', '')
         font_weight = text_style.get('fontWeight', 0)
 
-        # Extract fill colors
         fills = node_info.get('fills', [])
         fill_r = fill_g = fill_b = fill_a = 0
         if fills:
@@ -109,7 +104,6 @@ class FigmaNodeSimilarityDetector:
             fill_b = color.get('b', 0)
             fill_a = color.get('a', 1)
 
-        # Extract stroke colors
         strokes = node_info.get('strokes', [])
         stroke_r = stroke_g = stroke_b = stroke_a = 0
         if strokes:
@@ -122,35 +116,22 @@ class FigmaNodeSimilarityDetector:
 
         vector.extend([
             hash(font_family) % 1000 / 1000.0 if font_family else 0,
-            min(font_size / 10000.0, 1.0) if font_size else 0,  # Normalize font size to 0-1 (assuming max ~100px)
+            min(font_size / 10000.0, 1.0) if font_size else 0,  
             hash(font_style) % 1000 / 1000.0 if font_style else 0,
-            min(font_weight / 10000.0, 1.0) if font_weight else 0,  # Normalize font weight (max ~900-1000)
+            min(font_weight / 10000.0, 1.0) if font_weight else 0,  
             fill_r, fill_g, fill_b, fill_a,
             stroke_r, stroke_g, stroke_b, stroke_a,
         ])
 
         # 3. Content Features
         text_content = node_info.get('characters', '')
-        name = node_data.get('name', '')
         has_text = bool(text_content)
 
         vector.extend([
             float(has_text),
         ])
 
-        # 4. Semantic Features (using embeddings) - commented out for now
-        # if self.use_semantic_embeddings:
-        #     text_for_embedding = f"{name} {node_type}"
-        #     if text_for_embedding.strip():
-        #         try:
-        #             semantic_features = self.semantic_model.encode([text_for_embedding])[0].tolist()
-        #             vector.extend(semantic_features)
-        #         except:
-        #             vector.extend([0.0] * 384)  # Default embedding size
-        #     else:
-        #         vector.extend([0.0] * 384)
-        # else:
-        #     vector.extend([0.0] * 384)
+ 
 
         # 5. Descendant Count Feature (for leaf nodes, this is 0)
         total_descendants = 0  # Leaf nodes have no descendants
@@ -173,18 +154,14 @@ class FigmaNodeSimilarityDetector:
         """
         tag = node_data.get('tag', '')
         
-        # Check if tag is ICON or SVG - if so, return default vector of ones
         if tag in ["ICON", "SVG"]:
-            # Create default vector with ones
             default_size = 18  # structural(3) + style(12) + content(1) + descendant(1)
             return np.zeros(default_size)
         
         if not children_vectors:
-            # If no children vectors, create a default vector
-            default_size = 0 + 18  # Updated size: structural(3) + style(12) + content(1) + descendant(1)
+            default_size = 0 + 18  
             return np.zeros(default_size)
 
-        # Average all children feature vectors
         parent_vector = np.mean(children_vectors, axis=0)
 
         # Override some structural features specific to the parent
@@ -194,18 +171,14 @@ class FigmaNodeSimilarityDetector:
         node_layout = node_info.get('layout', '')
 
 
-        # Update structural features (first 3 elements)
         parent_vector[0] = hash(node_type) % 1000 / 1000.0
-        # parent_vector[1] = hash(tag) % 1000 / 1000.0
-        parent_vector[1] = 1.0  # Parent always has children
+        parent_vector[1] = 1.0 
         parent_vector[2] = min(num_children / 10000.0, 1.0)
         parent_vector[3] = hash(node_layout) % 1000 / 1000.0
 
-        # Calculate total descendants
         total_descendants = num_children
         for child_vector in children_vectors:
-            # The descendant count is the last feature in the vector
-            child_descendants = int(child_vector[-1] * 10000)  # Denormalize
+            child_descendants = int(child_vector[-1] * 10000)  
             total_descendants += child_descendants
 
         # Update the descendant count feature (last element)
@@ -224,10 +197,8 @@ class FigmaNodeSimilarityDetector:
         Returns:
             Similarity matrix as numpy array
         """
-        # Step 1: Build the tree structure and identify leaf nodes
         self.node_tree = self._build_node_tree(nodes_data)
         
-        # Step 2: Extract feature vectors bottom-up
         self.node_feature_vectors = {}
         self.node_metadata = {}
         self._extract_feature_vectors_bottom_up(nodes_data)
@@ -282,17 +253,15 @@ class FigmaNodeSimilarityDetector:
     def _extract_feature_vectors_bottom_up(self, data: Dict[str, Any], path: str = ""):
         """Extract feature vectors using bottom-up approach"""
         if isinstance(data, dict):
-            if 'node' in data:  # This is a node
+            if 'node' in data:  
                 current_path = f"{path}/{data.get('name', 'unnamed')}" if path else data.get('name', 'root')
                 
-                # First, process all children
                 children_vectors = []
                 if 'children' in data:
                     for child in data['children']:
                         child_path = f"{current_path}"
                         self._extract_feature_vectors_bottom_up(child, child_path)
                         
-                        # Get child path and vector
                         child_node_path = f"{current_path}/{child.get('name', 'unnamed')}"
                         if child_node_path in self.node_feature_vectors:
                             children_vectors.append(self.node_feature_vectors[child_node_path])
@@ -333,7 +302,6 @@ class FigmaNodeSimilarityDetector:
         
         threshold = threshold or self.similarity_threshold
         
-        # Method 1: Simple threshold-based grouping (only for non-leaf nodes)
         similarity_groups = self._threshold_based_grouping(threshold)
         
         return similarity_groups
@@ -348,11 +316,10 @@ class FigmaNodeSimilarityDetector:
             if self.node_paths[i] in assigned:
                 continue
                 
-            # Find all nodes similar to current node
             similar_indices = np.where(self.similarity_matrix[i] >= threshold)[0]
             similar_nodes = [self.node_paths[j] for j in similar_indices if j != i]
             
-            if similar_nodes:  # If we found similar nodes
+            if similar_nodes:  
                 group_id = f"group_{group_counter}"
                 groups[group_id] = [self.node_paths[i]] + similar_nodes
                 assigned.update(groups[group_id])
@@ -436,8 +403,8 @@ class FigmaNodeSimilarityDetector:
             "non_leaf_nodes": non_leaf_count,
             "feature_vector_length": vector_lengths[0] if vector_lengths else 0,
             "feature_breakdown": {
-                "structural_features": 3,
-                "style_features": 12,  # Updated: font_family, font_size, font_style, font_weight + colors
+                "structural_features": 4,
+                "style_features": 12,  
                 "content_features": 1,
                 "descendant_count": 1,
                 "semantic_features": 384 if self.use_semantic_embeddings else 0
@@ -453,9 +420,8 @@ class FigmaNodeSimilarityDetector:
             depth: Current depth in the tree
             path: Current path to the node
         """
-        indent = "  " * depth  # 2 spaces per level
+        indent = "  " * depth  
 
-        # Extract info
         name = node.get("name", "[no name]")
         tag = node.get("tag", "[no tag]")
         node_id = node.get("node_id", "")
@@ -470,23 +436,18 @@ class FigmaNodeSimilarityDetector:
         layout = node_data.get("layout", "NONE")
         layout_str = "ROWS" if layout == "HORIZONTAL" else "COLS" if layout == "VERTICAL" else layout
 
-        # Get the current node path
         current_path = f"{path}/{name}" if path else name
         
-        # Get feature vector if available
         vector_str = ""
         if current_path in self.node_feature_vectors:
             vector = self.node_feature_vectors[current_path]
-            # Format vector to show first few values and some key features
         if len(vector) > 0:
             vector_str = f" | Vector: [{', '.join(f'{v:.7f}' for v in vector)}] (len={len(vector)})"
         else:
             vector_str = " | Vector: Not found"
 
-        # Print current node info with feature vector
         print(f"{indent}- {display_name} [{tag}] -> {name} {layout_str} ({node_id}){vector_str}")
 
-        # Recursively print children
         for child in node.get("children", []):
             self.print_figma_tree_with_vectors(child, depth + 1, current_path)
 
@@ -504,20 +465,18 @@ class NodeSignature:
     has_text: bool
     text_content: str
     style_hash: str
-    layout_mode: str
+    node_layout: str
     children_count: int
-    children_signatures: List[str]  # Ordered list of child signatures
+    children_signatures: List[str]  
     
     def __post_init__(self):
-        # Normalize text content for comparison
         self.text_content = self.text_content.strip().lower() if self.text_content else ""
-        # Create a signature string for this node
         self.signature = self._create_signature()
     
     def _create_signature(self) -> str:
         """Create a unique signature string for this node"""
         children_sig = "|".join(self.children_signatures)
-        return f"{self.tag}:{self.node_type}:{self.has_text}:{self.style_hash}:{self.layout_mode}:{self.children_count}:{children_sig}"
+        return f"{self.tag}:{self.node_type}:{self.has_text}:{self.style_hash}:{self.node_layout}:{self.children_count}:{children_sig}"
 
 class MinEditDistanceSemanticGrouper:
     """
@@ -530,7 +489,7 @@ class MinEditDistanceSemanticGrouper:
                  structure_weight: float = 0.6,
                  style_weight: float = 0.3,
                  content_weight: float = 0.1,
-                 ignore_text_content: bool = False):
+                 ignore_text_content: bool = True):
         """
         Initialize the min edit distance grouper
         
@@ -566,7 +525,7 @@ class MinEditDistanceSemanticGrouper:
                 has_text=False,
                 text_content="",
                 style_hash="icon_svg_default",
-                layout_mode="NONE",
+                node_layout="NONE",
                 children_count=0,
                 children_signatures=[]
             )
@@ -575,7 +534,7 @@ class MinEditDistanceSemanticGrouper:
         node_type = node_info.get('type', '')
         has_text = bool(node_info.get('characters', ''))
         text_content = node_info.get('characters', '') if not self.ignore_text_content else ""
-        layout_mode = node_info.get('layout', 'NONE')
+        node_layout = node_info.get('layout', 'NONE')
         children_count = len(node_data.get('children', []))
         
         # Style hash (simplified - you can expand this)
@@ -590,7 +549,7 @@ class MinEditDistanceSemanticGrouper:
             has_text=has_text,
             text_content=text_content,
             style_hash=style_hash,
-            layout_mode=layout_mode,
+            node_layout=node_layout,
             children_count=children_count,
             children_signatures=children_signatures
         )
@@ -657,7 +616,6 @@ class MinEditDistanceSemanticGrouper:
             # Check if this is an ICON or SVG node
             tag = data.get('tag', '')
             if tag in ["ICON", "SVG"]:
-                # For ICON/SVG nodes, don't process children and store as leaf
                 signature.children_signatures = []
                 signature.signature = signature._create_signature()
                 self.node_signatures[current_path] = signature
@@ -671,7 +629,6 @@ class MinEditDistanceSemanticGrouper:
                 }
                 return
             
-            # Process children first to get their signatures
             children_signatures = []
             if 'children' in data:
                 for child in data['children']:
@@ -681,13 +638,11 @@ class MinEditDistanceSemanticGrouper:
                     if child_node_path in self.node_signatures:
                         children_signatures.append(self.node_signatures[child_node_path].signature)
             
-            # Update signature with children signatures
             signature.children_signatures = children_signatures
             signature.signature = signature._create_signature()
             
             self.node_signatures[current_path] = signature
             
-            # Store tree structure
             self.node_trees[current_path] = {
                 'data': data,
                 'children': [f"{current_path}/{child.get('name', 'unnamed')}" for child in data.get('children', [])],
@@ -718,20 +673,16 @@ class MinEditDistanceSemanticGrouper:
         if (tree1_info.get('is_icon_svg', False) or tree2_info.get('is_icon_svg', False)):
             return 1.0
         
-        # Use dynamic programming to calculate edit distance
         return self._tree_edit_distance_dp(sig1, sig2)
     
     def _tree_edit_distance_dp(self, sig1: NodeSignature, sig2: NodeSignature) -> float:
         """Dynamic programming implementation of tree edit distance"""
         
-        # Node-level similarity
         node_similarity = self._node_similarity(sig1, sig2)
         
-        # If nodes are very different, return high distance
         if node_similarity < 0.1:
             return 1.0
         
-        # Structure similarity based on children
         children1 = sig1.children_signatures
         children2 = sig2.children_signatures
         
@@ -766,17 +717,13 @@ class MinEditDistanceSemanticGrouper:
         
         similarities = []
         
-        # Tag and type similarity
         tag_sim = 1.0 if sig1.tag == sig2.tag else 0.0
         type_sim = 1.0 if sig1.node_type == sig2.node_type else 0.0
         
-        # Layout similarity
-        layout_sim = 1.0 if sig1.layout_mode == sig2.layout_mode else 0.0
+        layout_sim = 1.0 if sig1.node_layout == sig2.node_layout else 0.0
         
-        # Style similarity
         style_sim = 1.0 if sig1.style_hash == sig2.style_hash else 0.0
         
-        # Content similarity
         content_sim = 1.0
         if not self.ignore_text_content:
             if sig1.has_text and sig2.has_text:
@@ -784,11 +731,9 @@ class MinEditDistanceSemanticGrouper:
             elif sig1.has_text != sig2.has_text:
                 content_sim = 0.0
         
-        # Children count similarity
         max_children = max(sig1.children_count, sig2.children_count)
         children_count_sim = 1.0 - abs(sig1.children_count - sig2.children_count) / max(max_children, 1)
         
-        # Weighted combination
         total_similarity = (
             self.structure_weight * (tag_sim * 0.4 + type_sim * 0.3 + layout_sim * 0.3) +
             self.style_weight * style_sim +
@@ -808,11 +753,9 @@ class MinEditDistanceSemanticGrouper:
         if text1 == text2:
             return 1.0
         
-        # Length similarity
         max_len = max(len(text1), len(text2))
         len_sim = 1.0 - abs(len(text1) - len(text2)) / max_len
         
-        # Common characters ratio
         common_chars = len(set(text1) & set(text2))
         total_chars = len(set(text1) | set(text2))
         char_sim = common_chars / max(total_chars, 1)
@@ -852,10 +795,8 @@ class MinEditDistanceSemanticGrouper:
     def build_similarity_matrix(self, nodes_data: Dict[str, Any]) -> np.ndarray:
         """Build similarity matrix using min edit distance approach"""
         
-        # Step 1: Build node signatures
         self.build_node_signatures(nodes_data)
         
-        # Step 2: Filter non-leaf nodes for comparison (excluding ICON/SVG nodes)
         self.non_leaf_paths = [
             path for path, tree_info in self.node_trees.items() 
             if not tree_info['is_leaf'] and not tree_info.get('is_icon_svg', False)
@@ -865,7 +806,6 @@ class MinEditDistanceSemanticGrouper:
             logger.warning("No non-leaf nodes found for similarity comparison")
             return np.array([])
         
-        # Step 3: Calculate similarity matrix
         n = len(self.non_leaf_paths)
         similarity_matrix = np.zeros((n, n))
         
@@ -895,7 +835,6 @@ class MinEditDistanceSemanticGrouper:
         
         threshold = threshold or self.similarity_threshold
         
-        # Use connected components to find similarity groups
         return self._find_similarity_groups(threshold)
     
     def _find_similarity_groups(self, threshold: float) -> Dict[str, List[str]]:
@@ -918,7 +857,7 @@ class MinEditDistanceSemanticGrouper:
                 group = []
                 dfs(i, group)
                 
-                if len(group) > 1:  # Only create groups with multiple nodes
+                if len(group) > 1:  
                     group_id = f"group_{group_counter}"
                     groups[group_id] = [self.non_leaf_paths[idx] for idx in group]
                     group_counter += 1
@@ -927,13 +866,11 @@ class MinEditDistanceSemanticGrouper:
     
     def add_node_ids_to_json(self, original_data: Dict[str, Any], similarity_groups: Dict[str, List[str]]) -> Dict[str, Any]:
         """Add node_id to each node based on similarity groups"""
-        # Create mapping from node path to group id
         path_to_group = {}
         for group_id, node_paths in similarity_groups.items():
             for node_path in node_paths:
                 path_to_group[node_path] = group_id
         
-        # Add node_ids recursively
         return self._add_node_ids_recursive(original_data, path_to_group)
     
     def _add_node_ids_recursive(self, data: Dict[str, Any], path_to_group: Dict[str, str], path: str = "") -> Dict[str, Any]:
@@ -941,30 +878,25 @@ class MinEditDistanceSemanticGrouper:
         if isinstance(data, dict):
             result = data.copy()
             
-            if 'node' in data:  # This is a node
+            if 'node' in data:  
                 current_path = f"{path}/{data.get('name', 'unnamed')}" if path else data.get('name', 'root')
                 
-                # Check if this is a leaf node or ICON/SVG node
                 tag = data.get('tag', '')
                 is_leaf = len(data.get('children', [])) == 0
                 is_icon_svg = tag in ["ICON", "SVG"]
                 
                 if is_leaf or is_icon_svg:
-                    # Leaf nodes and ICON/SVG nodes get unique IDs
                     if is_icon_svg:
                         result['node_id'] = f"icon_svg_{hashlib.md5(current_path.encode()).hexdigest()[:8]}"
                     else:
                         result['node_id'] = f"leaf_{hashlib.md5(current_path.encode()).hexdigest()[:8]}"
                 else:
-                    # Non-leaf nodes get group IDs if they're in a similarity group
                     if current_path in path_to_group:
                         result['node_id'] = path_to_group[current_path]
                     else:
-                        # Generate unique ID for non-grouped non-leaf nodes
                         result['node_id'] = f"unique_{hashlib.md5(current_path.encode()).hexdigest()[:8]}"
             
             if 'children' in data and not data.get('tag', '') in ["ICON", "SVG"]:
-                # Don't process children for ICON/SVG nodes
                 child_path = f"{path}/{data.get('name', 'unnamed')}" if path else data.get('name', 'root')
                 result['children'] = [
                     self._add_node_ids_recursive(child, path_to_group, child_path)
@@ -1075,11 +1007,9 @@ def all_children_same_group(node):
     """Check if all direct children have the same group_id"""
     groups = get_direct_children_groups(node)
     
-    # If no groups found or only one group, return False
     if len(groups) <= 1:
         return False
     
-    # Check if all groups are the same
     return len(set(groups)) == 1
 
 def convert_children_ids(node, visited=None):
@@ -1087,19 +1017,15 @@ def convert_children_ids(node, visited=None):
     if visited is None:
         visited = set()
     
-    # Avoid infinite recursion
     if id(node) in visited:
         return
     visited.add(id(node))
     
-    # Process children if they exist
     if 'children' in node and isinstance(node['children'], list):
         for child in node['children']:
-            # Convert child's node_id if it exists
             if 'node_id' in child:
                 child['node_id'] = generate_unique_id()
             
-            # Recursively process the child's children
             convert_children_ids(child, visited)
 
 def process_json_tree(data):
@@ -1132,6 +1058,43 @@ def process_json_tree(data):
     return data
 
 
+def make_single_node_ids_unique(data):
+    """
+    Makes node_id values unique ONLY if they occur exactly once in the tree.
+    Nodes that appear multiple times keep their original node_id.
+    """
+    result = copy.deepcopy(data)
+    node_id_counts = defaultdict(int)
+    unique_counter = 1
+    
+    def count_ids(node):
+        if isinstance(node, dict):
+            if 'node_id' in node:
+                node_id_counts[node['node_id']] += 1
+            if 'children' in node:
+                for child in node['children']:
+                    count_ids(child)
+        elif isinstance(node, list):
+            for item in node:
+                count_ids(item)
+    
+    def make_unique(node):
+        nonlocal unique_counter
+        if isinstance(node, dict):
+            if 'node_id' in node and node_id_counts[node['node_id']] == 1:
+                node['node_id'] = f"unique_{uuid.uuid4().hex[:8]}"
+                unique_counter += 1
+            if 'children' in node:
+                for child in node['children']:
+                    make_unique(child)
+        elif isinstance(node, list):
+            for item in node:
+                make_unique(item)
+    
+    count_ids(result)
+    make_unique(result)
+    return result
+
 #################################################### UTILS ####################################################
 ###############################################################################################################
 ###############################################################################################################
@@ -1148,10 +1111,8 @@ def visualize_groups_on_image(image_path: str, json_data: Dict[str, Any], output
     import os
     os.makedirs(output_dir, exist_ok=True)
     
-    # Load base image
     base_image = Image.open(image_path)
     
-    # Extract node coordinates and group information
     node_groups = {}
     
     def extract_nodes_recursive(node, path=""):
@@ -1159,7 +1120,6 @@ def visualize_groups_on_image(image_path: str, json_data: Dict[str, Any], output
             if 'node' in node:
                 current_path = f"{path}/{node.get('name', 'unnamed')}" if path else node.get('name', 'root')
                 
-                # Get coordinates from absoluteBoundingBox
                 node_info = node.get('node', {})
                 x = node_info.get('x', 0)
                 y = node_info.get('y', 0)
@@ -1179,13 +1139,11 @@ def visualize_groups_on_image(image_path: str, json_data: Dict[str, Any], output
                     'height': height
                 })
                 
-                # Process children
                 for child in node.get('children', []):
                     extract_nodes_recursive(child, current_path)
     
     extract_nodes_recursive(json_data)
     
-    # Generate colors for each group
     colors = [
         (255, 0, 0),    # Red
         (0, 255, 0),    # Green
@@ -1200,36 +1158,29 @@ def visualize_groups_on_image(image_path: str, json_data: Dict[str, Any], output
     color_index = 0
     group_colors = {}
     
-    # Create image for each group
     for group_id, nodes in node_groups.items():
-        if len(nodes) <= 1:  # Skip groups with only one node
+        if len(nodes) <= 1:  
             continue
             
-        # Assign color to group
         if group_id not in group_colors:
             group_colors[group_id] = colors[color_index % len(colors)]
             color_index += 1
         
-        # Create a copy of the base image
         group_image = base_image.copy()
         draw = ImageDraw.Draw(group_image)
         
-        # Draw rectangles around nodes in this group
         color = group_colors[group_id]
         for node in nodes:
             x, y, width, height = int(node['x']), int(node['y']), int(node['width']), int(node['height'])
             
-            # Draw rectangle outline
             draw.rectangle(
                 [(x, y), (x + width, y + height)],
                 outline=color,
                 width=4
             )
             
-            # Add group label
             draw.text((x, max(0, y - 25)), f"{group_id}", fill=color)
         
-        # Save the image
         output_path = f"{output_dir}/group_{group_id}.png"
         group_image.save(output_path)
         print(f"Saved: {output_path}")
@@ -1249,25 +1200,20 @@ def visualize_groups_on_image(image_path: str, json_data: Dict[str, Any], output
 def print_figma_node(node, depth=0):
     indent = "  " * depth  # 2 spaces per level
 
-    # Extract info
     name = node.get("name", "[no name]")
     tag = node.get("tag", "[no tag]")
     node_id = node.get("node_id", "")
     
-    # Handle TEXT nodes with characters
     node_data = node.get("node", {})
     characters = node_data.get("characters", "")
     is_text = tag == "TEXT"
     display_name = characters[:10] + "..." if is_text and characters else name
 
-    # Layout info (if present)
     layout = node_data.get("layout", "NONE")
     layout_str = "ROWS" if layout == "HORIZONTAL" else "COLS" if layout == "VERTICAL" else layout
 
-    # Print current node info
     print(f"{indent}- {display_name} [{tag}] -> {name} {layout_str} ({node_id})")
 
-    # Recursively print children
     for child in node.get("children", []):
         print_figma_node(child, depth + 1)
 
@@ -1288,7 +1234,7 @@ def print_figma_node(node, depth=0):
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5123"],  # or ["*"] for dev
+    allow_origins=["http://localhost:5123"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1301,7 +1247,6 @@ class JSONData(BaseModel):
     data: Dict[str, Any]
 
 
-# Alternative endpoint if you want to return just the processed data
 @app.post("/api")
 async def process_figma_data_simple(json_data: JSONData) -> Dict[str, Any]:
     """
@@ -1311,13 +1256,11 @@ async def process_figma_data_simple(json_data: JSONData) -> Dict[str, Any]:
         import copy
         data = copy.deepcopy(json_data.data)
         
-        # Rename names and create mapping
         name_mapping = {}
         counter = [0]
         rename_names_and_store_mapping(data, counter, name_mapping)
         
-        # Process with similarity detector
-        detector = FigmaNodeSimilarityDetector(
+        detector = FeatureVectorSemanticGrouper(
             similarity_threshold=0.99999999999,
             use_semantic_embeddings=True
         )
@@ -1326,9 +1269,10 @@ async def process_figma_data_simple(json_data: JSONData) -> Dict[str, Any]:
         similarity_groups = detector.check_similarity()
         result_json = detector.add_node_ids_to_json(data, similarity_groups)
         
-        # Restore original names
         restore_names_from_mapping(result_json, name_mapping)
-        
+        result_json = make_single_node_ids_unique(result_json)
+
+
         return result_json
         
     except Exception as e:
@@ -1344,34 +1288,28 @@ async def process_figma_data_min_edit(json_data: JSONData) -> Dict[str, Any]:
         import copy
         data = copy.deepcopy(json_data.data)
         
-        # Rename names and create mapping
         name_mapping = {}
         counter = [0]
         rename_names_and_store_mapping(data, counter, name_mapping)
         
-        # Initialize the min edit distance grouper
         grouper = MinEditDistanceSemanticGrouper(
-            similarity_threshold=0.99999,  # Higher threshold for more precise grouping
+            similarity_threshold=0.99999,  
             structure_weight=0.6,
             style_weight=0.3,
             content_weight=0.1,
-            ignore_text_content=False
+            ignore_text_content=True
         )
         
-        # Build similarity matrix
         similarity_matrix = grouper.build_similarity_matrix(data)
         
-        # Find similar groups
         similarity_groups = grouper.check_similarity()
         
-        # Add node_ids to JSON
         result_json = grouper.add_node_ids_to_json(data, similarity_groups)
         
-        # Restore original names
         restore_names_from_mapping(result_json, name_mapping)
 
         result_json = add_node_ids(result_json)
-
+        result_json = make_single_node_ids_unique(result_json)
         
         return result_json
         
@@ -1380,23 +1318,26 @@ async def process_figma_data_min_edit(json_data: JSONData) -> Dict[str, Any]:
     
 
 
-# New Enhanced Endpoints with JSON Processing
+class JSONDataWithThreshold(BaseModel):
+    data: Dict[str, Any]
+    threshold: Optional[float] = 0.99999999999
+
 @app.post("/api/enhanced")
-async def process_figma_data_simple_enhanced(json_data: JSONData) -> Dict[str, Any]:
+async def process_figma_data_simple_enhanced(json_data: JSONDataWithThreshold) -> Dict[str, Any]:
     """
     Enhanced version that applies JSON tree processing before returning the result
+    Accepts optional threshold parameter in request body (defaults to 0.99999999999)
     """
     try:
         data = copy.deepcopy(json_data.data)
+        threshold = json_data.threshold
         
-        # Rename names and create mapping
         name_mapping = {}
         counter = [0]
         rename_names_and_store_mapping(data, counter, name_mapping)
         
-        # Process with similarity detector
-        detector = FigmaNodeSimilarityDetector(
-            similarity_threshold=0.99999999999,
+        detector = FeatureVectorSemanticGrouper(
+            similarity_threshold=threshold,
             use_semantic_embeddings=True
         )
         
@@ -1404,15 +1345,15 @@ async def process_figma_data_simple_enhanced(json_data: JSONData) -> Dict[str, A
         similarity_groups = detector.check_similarity()
         result_json = detector.add_node_ids_to_json(data, similarity_groups)
         
-        # Restore original names
-        restore_names_from_mapping(result_json, name_mapping)
         
-        # Apply JSON tree processing before returning
         processed_result = process_json_tree(copy.deepcopy(result_json))
+        processed_result = make_single_node_ids_unique(processed_result)
+
         return processed_result
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Enhanced processing error: {str(e)}")
+    
 
 @app.post("/api/min-edit-distance/enhanced")
 async def process_figma_data_min_edit_enhanced(json_data: JSONData) -> Dict[str, Any]:
@@ -1422,36 +1363,30 @@ async def process_figma_data_min_edit_enhanced(json_data: JSONData) -> Dict[str,
     try:
         data = copy.deepcopy(json_data.data)
         
-        # Rename names and create mapping
         name_mapping = {}
         counter = [0]
         rename_names_and_store_mapping(data, counter, name_mapping)
         
-        # Initialize the min edit distance grouper
         grouper = MinEditDistanceSemanticGrouper(
-            similarity_threshold=0.99999,  # Higher threshold for more precise grouping
+            similarity_threshold=0.99999,  
             structure_weight=0.6,
             style_weight=0.3,
             content_weight=0.1,
-            ignore_text_content=False
+            ignore_text_content=True
         )
         
-        # Build similarity matrix
         similarity_matrix = grouper.build_similarity_matrix(data)
         
-        # Find similar groups
         similarity_groups = grouper.check_similarity()
         
-        # Add node_ids to JSON
         result_json = grouper.add_node_ids_to_json(data, similarity_groups)
         
-        # Restore original names
         restore_names_from_mapping(result_json, name_mapping)
         
-        # Apply JSON tree processing before returning
         processed_result = process_json_tree(copy.deepcopy(result_json))
 
         processed_result = add_node_ids(processed_result)
+        processed_result = make_single_node_ids_unique(processed_result)
 
         
         return processed_result
